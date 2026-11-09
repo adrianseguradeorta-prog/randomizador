@@ -6,11 +6,11 @@ Web app de formación para sortear temas de buceo entre participantes y organiza
 
 - **Participantes:** introduce nombres uno a uno o pega una lista separada por líneas, comas o punto y coma. Se eliminan duplicados.
 - **Banco de temas:** más de 100 temas sobre seguridad, fisiología, equipos, operaciones, emergencias, física, medioambiente y cultura del buceo. Selecciona categorías y añade tus propios temas.
-- **Sorteo:** asigna un tema a cada participante y también aleatoriza el orden de intervención. Evita repetir temas mientras queden sin usar en el banco activo.
-- **Modo colectivo:** todos preparan durante **15:00** y, después, cada participante dispone de **01:00** para explicar su tema.
-- **Modo individual:** cada participante pasa por una preparación propia de **15:00** y una exposición de **01:00**, antes de pasar al siguiente.
+- **Ruleta por participante:** cada persona gira su propia ruleta con una selección aleatoria de hasta ocho temas activos. El tema donde se detiene queda asignado a esa persona. El orden de turnos se sortea al empezar. Se evitan las repeticiones hasta agotar los temas disponibles.
+- **Modo colectivo:** después de girar todas las ruletas, todos preparan durante **15:00** y, después, cada participante dispone de **01:00** para explicar su tema.
+- **Modo individual:** después de girar todas las ruletas, cada participante pasa por una preparación propia de **15:00** y una exposición de **01:00**, antes de pasar al siguiente.
 - **Cronómetros:** iniciar, pausar, reanudar, reiniciar y pasar de fase. Aviso sonoro opcional al agotarse el tiempo.
-- **Recuperación:** nombres, temas personalizados, filtros, sorteo y cronómetro se conservan en el navegador, incluso tras recargar.
+- **Recuperación:** nombres, temas personalizados, filtros, resultados de las ruletas y cronómetro se conservan en el navegador, incluso tras recargar.
 - **Exportación:** descarga el reparto en CSV.
 - **Instalable:** web app (PWA), con caché para usarla sin conexión tras la primera visita en línea.
 
