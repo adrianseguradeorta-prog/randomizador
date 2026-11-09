@@ -142,15 +142,19 @@ function loadState(){
   } catch {return defaults;}
 }
 function validateSession(s){
-  if(!s||!['collective-prep','individual-prep','presenting','finished'].includes(s.phase)||!Array.isArray(s.assignments)||!s.assignments.length||!['collective','individual'].includes(s.mode))return null;
+  if(!s||!['wheel','collective-prep','individual-prep','presenting','finished'].includes(s.phase)||!Array.isArray(s.assignments)||!s.assignments.length||!['collective','individual'].includes(s.mode))return null;
   if(!Number.isInteger(s.index)||s.index<0||s.index>=s.assignments.length)return null;
-  if(s.phase!=='finished'&&(!s.timer||!Number.isFinite(s.timer.remainingMs)))return null;
+  if(s.phase==='wheel'){
+    if(!s.wheel||!Array.isArray(s.wheel.options)||s.wheel.options.length<1||!['ready','spinning','done'].includes(s.wheel.status))return null;
+    if(s.wheel.status!=='ready'&&(!Number.isInteger(s.wheel.winnerIndex)||s.wheel.winnerIndex<0||s.wheel.winnerIndex>=s.wheel.options.length))return null;
+  } else if(s.phase!=='finished'&&(!s.timer||!Number.isFinite(s.timer.remainingMs)))return null;
   return s;
 }
 let state=loadState();
 let toastTimeout=null;
 let audioContext=null;
 let wakeLock=null;
+let spinTimeout=null;
 const app=document.getElementById('app');
 const toastElement=document.getElementById('toast');
 
@@ -196,26 +200,133 @@ function renderSetup(){
         <details id="topic-details" class="topic-manage" ${state.customOpen?'open':''}><summary>Gestionar temas personalizados</summary><div class="topic-manage-inner"><form id="topic-form" class="custom-form"><div class="span-all"><label class="field-label" for="new-topic-title">TEMA</label><input id="new-topic-title" name="title" class="form-input" maxlength="100" required placeholder="Ej.: Buceo nocturno"></div><div><label class="field-label" for="new-topic-category">CATEGORÍA</label><select id="new-topic-category" name="category" class="form-input">${CATEGORIES.map(c=>`<option value="${c.id}">${esc(c.label)}</option>`).join('')}</select></div><div><label class="field-label" for="new-topic-cue">PREGUNTA GUÍA (OPCIONAL)</label><input id="new-topic-cue" name="cue" maxlength="160" class="form-input" placeholder="¿Qué explicarías?"></div><button type="submit" class="btn btn-secondary span-all">+ Añadir tema al banco</button></form>${state.customTopics.length?`<p class="form-hint">Tus temas (${state.customTopics.length}):</p><div class="custom-list">${customHtml}</div>`:'<p class="form-hint">Los temas que añadas quedarán guardados en este navegador.</p>'}</div></details>
       </section>
     </div>
-    <div class="action-strip"><div><strong>Todo preparado para el sorteo</strong><small>${state.participants.length?`${state.participants.length} participante${state.participants.length===1?'':'s'} · `:'Añade participantes · '}${selected.length} temas posibles</small></div><button type="button" data-action="draw" class="btn btn-primary" ${!state.participants.length||!selected.length?'disabled':''}>Sortear temas <span class="btn-arrow">↗</span></button></div>
+    <div class="action-strip"><div><strong>Todo preparado para el sorteo</strong><small>${state.participants.length?`${state.participants.length} participante${state.participants.length===1?'':'s'} · `:'Añade participantes · '}${selected.length} temas posibles</small></div><button type="button" data-action="draw" class="btn btn-primary" ${!state.participants.length||!selected.length?'disabled':''}>Empezar ruleta <span class="btn-arrow">↗</span></button></div>
     ${renderHelp()}`;
 }
-function renderHelp(){return `<div class="help-area"><div class="help-tile"><span class="help-number">01</span><div><strong>Introduce los nombres</strong><p>Añade una persona o pega una lista. El orden de exposición se sortea automáticamente.</p></div></div><div class="help-tile"><span class="help-number">02</span><div><strong>Sortea conceptos</strong><p>Cada participante recibe un tema. Puedes añadir otros o seleccionar categorías.</p></div></div><div class="help-tile"><span class="help-number">03</span><div><strong>Prepara y explica</strong><p>Cuenta atrás de 15 minutos de preparación y 1 minuto para cada intervención.</p></div></div></div>`;}
+function renderHelp(){
+  return `<div class="help-area"><div class="help-tile"><span class="help-number">01</span><div><strong>Introduce los nombres</strong><p>Añade una persona o pega una lista. El orden de participación se sortea automáticamente.</p></div></div><div class="help-tile"><span class="help-number">02</span><div><strong>Gira la ruleta por persona</strong><p>Cada participante hace girar su ruleta para descubrir su tema, sin repeticiones mientras queden disponibles.</p></div></div><div class="help-tile"><span class="help-number">03</span><div><strong>Prepara y explica</strong><p>15 minutos de preparación colectiva o individual y 1 minuto de exposición por participante.</p></div></div></div>`;
+}
 
-function drawSession(){
-  const possible=selectedTopics();if(!state.participants.length||!possible.length){showToast('Añade participantes y activa al menos una categoría.');return;}
+function startWheelSession(){
+  const possible=selectedTopics();
+  if(!state.participants.length||!possible.length){showToast('Añade participantes y activa al menos una categoría.');return;}
   const names=shuffled(state.participants);
-  let unused=shuffled(possible.filter(t=>!state.usedTopicIds.includes(t.id)));
-  if(unused.length<names.length){
-    const alreadyPicked=new Set(unused.map(t=>t.id));
-    unused=unused.concat(shuffled(possible.filter(t=>!alreadyPicked.has(t.id))));
+  state.session={mode:state.mode,phase:'wheel',index:0,assignments:names.map(name=>({name,done:false})),timer:null,wheel:null,startedAt:new Date().toISOString()};
+  prepareWheel();
+  save();render();
+  document.getElementById('app').scrollIntoView({behavior:'smooth',block:'start'});
+  showToast(`Ruleta preparada para ${names[0]}.`);
+}
+
+function prepareWheel(){
+  const s=state.session;
+  if(!s||s.phase!=='wheel')return;
+  const possible=selectedTopics();
+  const assigned=new Set(s.assignments.filter(a=>a.id).map(a=>a.id));
+  let pool=possible.filter(t=>!state.usedTopicIds.includes(t.id)&&!assigned.has(t.id));
+  if(!pool.length)pool=possible.filter(t=>!assigned.has(t.id));
+  if(!pool.length)pool=possible;
+  const candidates=shuffled(pool).slice(0,Math.min(8,pool.length));
+  s.wheel={options:candidates.map(t=>({id:t.id,title:t.title,category:t.category,cue:t.cue})),winnerIndex:null,finalAngle:0,status:'ready'};
+}
+
+function spinWheel(){
+  const s=state.session;
+  if(!s||s.phase!=='wheel'||s.wheel?.status!=='ready')return;
+  const w=s.wheel;
+  w.winnerIndex=randomIndex(w.options.length);
+  const sector=360/w.options.length;
+  w.finalAngle=360*7+360-(w.winnerIndex+.5)*sector;
+  w.status='spinning';
+  save();render();
+  if(window.matchMedia?.('(prefers-reduced-motion: reduce)').matches){completeWheelSpin();return;}
+  window.requestAnimationFrame(()=>window.requestAnimationFrame(()=>{
+    if(state.session!==s||s.wheel!==w||w.status!=='spinning')return;
+    const wheel=document.getElementById('topic-wheel');
+    if(wheel)wheel.style.transform=`rotate(${w.finalAngle}deg)`;
+  }));
+  clearTimeout(spinTimeout);
+  spinTimeout=setTimeout(()=>{if(state.session===s&&s.wheel===w)completeWheelSpin();},4600);
+}
+
+function completeWheelSpin(silent=false){
+  const s=state.session;
+  if(!s||s.phase!=='wheel'||s.wheel?.status!=='spinning')return;
+  const w=s.wheel;
+  const topic=w.options[w.winnerIndex];
+  if(!topic)return;
+  Object.assign(s.assignments[s.index],{id:topic.id,title:topic.title,category:topic.category,cue:topic.cue,done:false});
+  state.usedTopicIds=[...new Set([...state.usedTopicIds,topic.id])].slice(-500);
+  w.status='done';
+  clearTimeout(spinTimeout);spinTimeout=null;
+  save();render();
+  if(!silent){playBeep();showToast(`Tema asignado a ${s.assignments[s.index].name}.`);}
+}
+
+function nextWheelParticipant(){
+  const s=state.session;
+  if(!s||s.phase!=='wheel'||s.wheel?.status!=='done')return;
+  if(s.index<s.assignments.length-1){
+    s.index++;
+    prepareWheel();
+    save();render();
+  }else{
+    s.index=0;
+    s.wheel=null;
+    s.phase=s.mode==='collective'?'collective-prep':'individual-prep';
+    s.timer=newTimer(PREP_MS);
+    save();render();
+    showToast('Todos tienen tema. Preparación lista para empezar.');
   }
-  const chosen=[];
-  for(let i=0;i<names.length;i++)chosen.push(unused[i%unused.length]);
-  state.usedTopicIds=[...new Set([...state.usedTopicIds,...chosen.map(t=>t.id)])].slice(-500);
-  state.session={mode:state.mode,phase:state.mode==='collective'?'collective-prep':'individual-prep',index:0,assignments:names.map((name,i)=>({...chosen[i],name,done:false})),timer:newTimer(PREP_MS),startedAt:new Date().toISOString()};
-  save();render();document.getElementById('app').scrollIntoView({behavior:'smooth',block:'start'});
-  if(possible.length<names.length)showToast('Hay más participantes que temas: se han repetido algunos.');
-  else showToast('Sorteo realizado. ¡Preparados para empezar!');
+  document.getElementById('app').scrollIntoView({behavior:'smooth',block:'start'});
+}
+
+function renderWheelSession(){
+  const s=state.session;
+  const w=s.wheel;
+  const a=s.assignments[s.index];
+  const n=w.options.length;
+  const step=360/n;
+  const colors=['#1a6471','#153f50','#1a5966','#1b4858','#1c6972','#164755','#236372','#1b5062'];
+  const fill=`conic-gradient(${w.options.map((_,i)=>`${colors[i%colors.length]} ${(i*step).toFixed(3)}deg ${((i+1)*step).toFixed(3)}deg`).join(',')})`;
+  const labels=w.options.map((topic,i)=>{
+    const angle=(i+.5)*step;
+    const rad=(angle-90)*Math.PI/180;
+    const x=50+34*Math.cos(rad), y=50+34*Math.sin(rad);
+    const text=topic.title.length>27?`${topic.title.slice(0,25)}…`:topic.title;
+    return `<span class="wheel-label" style="left:${x.toFixed(2)}%;top:${y.toFixed(2)}%" title="${esc(topic.title)}">${esc(text)}</span>`;
+  }).join('');
+  const assignedCount=s.assignments.filter(person=>!!person.id).length;
+  const line=s.assignments.map((person,i)=>{
+    const active=i===s.index;
+    const title=person.title?esc(person.title):'Aún sin sortear';
+    return `<div class="lineup-item ${active?'current':''}"><div class="lineup-number">${String(i+1).padStart(2,'0')}</div><div><div class="lineup-name">${esc(person.name)}</div><div class="lineup-topic ${!person.title?'wheel-unassigned':''}">${title}</div><div class="lineup-meta"><span>${person.category?esc(categoryFor(person.category).label):'Pendiente'}</span><span class="dot"></span><span class="item-state ${!person.title?'waiting-state':''}">${person.title?'Tema asignado':active?'En la ruleta':'Por sortear'}</span></div></div></div>`;
+  }).join('');
+  const done=w.status==='done',spinning=w.status==='spinning';
+  const result=done
+    ? `<span class="wheel-result-label">TEMA ASIGNADO A ${esc(a.name.toUpperCase())}</span><strong>${esc(a.title)}</strong><p>${esc(a.cue)}</p>`
+    : spinning
+      ? '<span class="wheel-result-label">RULETA EN MOVIMIENTO</span><strong>Eligiendo tema…</strong><p>El resultado aparecerá cuando se detenga la ruleta.</p>'
+      : '<span class="wheel-result-label">TODO PREPARADO</span><strong>¿Qué tema te tocará?</strong><p>Pulsa «Girar ruleta» para descubrirlo.</p>';
+  app.innerHTML=`
+    <div class="section-heading"><div><span class="step-tag">02 / RULETA DE TEMAS</span><h2>Una ruleta por participante</h2><p>Girad por turnos. El tema se asigna al detenerse la ruleta.</p></div><span class="counter-flag"><strong>${assignedCount}</strong> / ${s.assignments.length} ASIGNADOS</span></div>
+    <div class="active-grid wheel-layout"><section class="panel wheel-panel" aria-labelledby="wheel-heading">
+      <div class="wheel-heading-line"><span class="overline">SORTEO INDIVIDUAL · ${s.mode==='collective'?'PREPARACIÓN COLECTIVA':'PREPARACIÓN INDIVIDUAL'}</span><span class="timer-phase-badge">PARTICIPANTE ${s.index+1} / ${s.assignments.length}</span></div>
+      <h3 id="wheel-heading" class="wheel-participant">${esc(a.name)}</h3>
+      <p class="wheel-subtitle">${n} tema${n===1?'':'s'} elegido${n===1?'':'s'} al azar del banco activo. Cada giro puede mostrar una selección distinta.</p>
+      <div class="wheel-stage">
+        <div class="wheel-pointer" aria-hidden="true"></div>
+        <div id="topic-wheel" class="topic-wheel ${spinning?'is-spinning':''}" style="background:${fill};transform:rotate(${done?w.finalAngle:0}deg)" role="img" aria-label="Ruleta de temas: ${esc(w.options.map(t=>t.title).join(', '))}">
+          <div class="wheel-segments">${labels}</div><div class="wheel-hub"><span>◎</span><small>BUCEO</small></div>
+        </div>
+      </div>
+      <div class="wheel-result" role="status" aria-live="polite">${result}</div>
+      <div class="wheel-actions">
+        <button type="button" data-action="spin-wheel" class="btn btn-primary" ${w.status!=='ready'?'disabled':''}>${spinning?'◌ Girando…':'◉ Girar ruleta'}</button>
+        <button type="button" data-action="next-wheel" class="btn btn-secondary" ${!done?'disabled':''}>${s.index===s.assignments.length-1?'Empezar preparación':'Siguiente participante'} <span class="btn-arrow">→</span></button>
+      </div>
+      <span class="timer-help">${done?'El tema queda guardado en el reparto.':spinning?'Espera a que la ruleta se detenga.':'Ningún tema se repite mientras queden otros disponibles.'}</span>
+    </section><aside class="panel lineup-panel"><div class="lineup-title"><div><h3>Participantes y resultados</h3><p>Orden aleatorio · Giro por persona</p></div><span class="count-pill">${assignedCount} de ${s.assignments.length}</span></div><div class="lineup-list">${line}</div><div class="operation-bar"><span class="wheel-summary-note">${assignedCount===s.assignments.length?'Todos los temas asignados':'Faltan '+(s.assignments.length-assignedCount)+' por sortear'}</span><button type="button" data-action="new-session">↺ Nueva ronda</button></div></aside></div>${renderHelp()}`;
 }
 function newTimer(duration){return {duration,remainingMs:duration,running:false,endsAt:null};}
 function remaining(t){return t.running?Math.max(0,t.endsAt-Date.now()):Math.max(0,t.remainingMs);}
@@ -229,6 +340,7 @@ function phaseInfo(){
 }
 function renderSession(){
   const s=state.session;
+  if(s.phase==='wheel'){renderWheelSession();return;}
   if(s.phase==='finished'){renderFinished();return;}
   const p=phaseInfo();const prep=s.phase!=='presenting';const t=s.timer;const ms=remaining(t);const percent=((t.duration-ms)/t.duration*100).toFixed(2)+'%';
   const lineup=s.assignments.map((a,i)=>{
@@ -291,17 +403,20 @@ app.addEventListener('click',event=>{
   if(action==='remove-participant'){state.participants.splice(Number(button.dataset.index),1);save();render();}
   else if(action==='set-mode'){state.mode=button.dataset.mode;save();render();}
   else if(action==='remove-topic'){state.customTopics=state.customTopics.filter(t=>t.id!==button.dataset.id);state.usedTopicIds=state.usedTopicIds.filter(id=>id!==button.dataset.id);state.customOpen=true;save();render();}
-  else if(action==='draw'){drawSession();}
+  else if(action==='draw'){startWheelSession();}
+  else if(action==='spin-wheel'){spinWheel();}
+  else if(action==='next-wheel'){nextWheelParticipant();}
   else if(action==='toggle-timer'){toggleTimer();}
   else if(action==='reset-timer'){resetTimer();}
   else if(action==='advance'){advance();}
   else if(action==='export'){exportCSV();}
-  else if(action==='new-session'){if(state.session?.phase!=='finished'&&!confirm('¿Terminar la ronda actual y volver a la configuración?'))return;releaseWakeLock();state.session=null;save();render();document.getElementById('app').scrollIntoView({behavior:'smooth',block:'start'});}
+  else if(action==='new-session'){if(state.session?.phase!=='finished'&&!confirm('¿Terminar la ronda actual y volver a la configuración?'))return;releaseWakeLock();clearTimeout(spinTimeout);spinTimeout=null;state.session=null;save();render();document.getElementById('app').scrollIntoView({behavior:'smooth',block:'start'});}
 });
 document.getElementById('sound-toggle').addEventListener('click',()=>{state.sound=!state.sound;save();render();showToast(state.sound?'Avisos sonoros activados.':'Avisos sonoros desactivados.');});
 document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible'&&state.session?.timer?.running)requestWakeLock();});
 window.addEventListener('pagehide',()=>releaseWakeLock());
 setInterval(tick,175);
 render();
+if(state.session?.phase==='wheel'&&state.session.wheel?.status==='spinning')completeWheelSpin(true);
 if(state.session?.timer?.running){tick();requestWakeLock();}
 if('serviceWorker' in navigator&&location.protocol==='https:')window.addEventListener('load',()=>navigator.serviceWorker.register('./sw.js').catch(()=>{}));
